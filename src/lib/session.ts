@@ -11,9 +11,9 @@ import { getDb } from '../db/client.js';
 import { sessions, users, type User } from '../db/schema.js';
 import { generateToken, sha256 } from './crypto.js';
 import { getEnv } from './env.js';
+import { CSRF_COOKIE, SESSION_COOKIE } from './constants.js';
 
-export const SESSION_COOKIE = 'outreach_session';
-export const CSRF_COOKIE = 'outreach_csrf';
+export { SESSION_COOKIE, CSRF_COOKIE } from './constants.js';
 
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 

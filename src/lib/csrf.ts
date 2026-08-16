@@ -10,9 +10,9 @@
  */
 import { cookies } from 'next/headers';
 import { safeEqual } from './crypto.js';
-import { CSRF_COOKIE } from './session.js';
+import { CSRF_COOKIE, CSRF_FIELD } from './constants.js';
 
-export const CSRF_FIELD = '_csrf';
+export { CSRF_FIELD };
 
 /** The token to embed in a form. Returns empty string when unauthenticated. */
 export async function getCsrfToken(): Promise<string> {
