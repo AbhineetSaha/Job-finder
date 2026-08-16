@@ -202,7 +202,9 @@ export async function createDraft(
         templateId: template.id,
         direction: 'OUTBOUND',
         toEmail: built.recipient,
-        fromEmail: getEnv().EMAIL_FROM ?? null,
+        // EMAIL_FROM is the configured sending identity; the profile email is
+        // the fallback so a mock-mode draft still has a coherent From.
+        fromEmail: getEnv().EMAIL_FROM ?? profile?.email ?? null,
         subject: rendered.email.subject,
         bodyText: body,
         variables: rendered.email.used,
@@ -350,7 +352,10 @@ export async function approveDraft(
     const message = rows[0];
     if (!message) return { ok: false, error: 'Message not found.' };
 
-    if (!['DRAFT', 'PENDING_APPROVAL'].includes(message.status)) {
+    // BLOCKED is included so a message blocked for a fixable reason (an expired
+    // window, a missing postal address) can be re-approved rather than stranded.
+    // The preflight re-checks everything at send time regardless.
+    if (!['DRAFT', 'PENDING_APPROVAL', 'BLOCKED'].includes(message.status)) {
       return { ok: false, error: `A message that is ${message.status} cannot be approved.` };
     }
 

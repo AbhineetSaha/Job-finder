@@ -27,6 +27,7 @@ import {
   replies,
   sendLedger,
   settings,
+  userProfiles,
   type Message,
 } from '../db/schema.js';
 import {
@@ -176,8 +177,10 @@ async function buildSnapshot(
 
     const memberRow = memberRows[0];
     if (!memberRow) {
-      // The enrolment vanished. Report it rather than treating it as "no campaign".
-      return { ...{}, now };
+      // The enrolment vanished mid-flight. Return a deliberately incomplete
+      // snapshot so the preflight blocks with SNAPSHOT_INCOMPLETE rather than
+      // silently degrading to "this is a one-off message with no campaign".
+      return { now };
     }
     campaignStatus = memberRow.campaign.status;
     campaignMemberStatus = memberRow.member.status;
@@ -202,32 +205,35 @@ async function buildSnapshot(
   const hourAgo = new Date(now.getTime() - 60 * 60 * 1000);
   const domain = emailDomain(message.toEmail) ?? '';
 
-  const [todayRows, hourRows, domainRows, lastRows] = await Promise.all([
-    tx
-      .select({ count: sql<number>`count(*)::int` })
-      .from(sendLedger)
-      .where(and(eq(sendLedger.userId, message.userId), gte(sendLedger.sentAt, dayStart))),
-    tx
-      .select({ count: sql<number>`count(*)::int` })
-      .from(sendLedger)
-      .where(and(eq(sendLedger.userId, message.userId), gte(sendLedger.sentAt, hourAgo))),
-    tx
-      .select({ count: sql<number>`count(*)::int` })
-      .from(sendLedger)
-      .where(
-        and(
-          eq(sendLedger.userId, message.userId),
-          eq(sendLedger.recipientDomain, domain),
-          gte(sendLedger.sentAt, dayStart),
-        ),
+  // Sequential, not Promise.all: these share one transaction client, and pg
+  // does not support concurrent queries on a single client.
+  const todayRows = await tx
+    .select({ count: sql<number>`count(*)::int` })
+    .from(sendLedger)
+    .where(and(eq(sendLedger.userId, message.userId), gte(sendLedger.sentAt, dayStart)));
+
+  const hourRows = await tx
+    .select({ count: sql<number>`count(*)::int` })
+    .from(sendLedger)
+    .where(and(eq(sendLedger.userId, message.userId), gte(sendLedger.sentAt, hourAgo)));
+
+  const domainRows = await tx
+    .select({ count: sql<number>`count(*)::int` })
+    .from(sendLedger)
+    .where(
+      and(
+        eq(sendLedger.userId, message.userId),
+        eq(sendLedger.recipientDomain, domain),
+        gte(sendLedger.sentAt, dayStart),
       ),
-    tx
-      .select({ sentAt: sendLedger.sentAt })
-      .from(sendLedger)
-      .where(eq(sendLedger.userId, message.userId))
-      .orderBy(desc(sendLedger.sentAt))
-      .limit(1),
-  ]);
+    );
+
+  const lastRows = await tx
+    .select({ sentAt: sendLedger.sentAt })
+    .from(sendLedger)
+    .where(eq(sendLedger.userId, message.userId))
+    .orderBy(desc(sendLedger.sentAt))
+    .limit(1);
 
   const rateLimit = checkRateLimits(
     config.rateLimits,
@@ -241,6 +247,15 @@ async function buildSnapshot(
   );
 
   const provider = getEmailProvider();
+
+  // A missing sender identity is a configuration gap, and must surface as a
+  // blocked send with a clear reason rather than as an opaque provider error.
+  const profileRows = await tx
+    .select({ email: userProfiles.email })
+    .from(userProfiles)
+    .where(eq(userProfiles.userId, message.userId))
+    .limit(1);
+  const fromAddress = message.fromEmail ?? getEnv().EMAIL_FROM ?? profileRows[0]?.email ?? '';
 
   return {
     globalSendPaused: config.globalSendPaused,
@@ -267,7 +282,7 @@ async function buildSnapshot(
     rateLimitAllowed: rateLimit.allowed,
     rateLimitDetail: rateLimit.detail,
     postalAddressConfigured: config.postalAddress.trim().length > 0,
-    providerConfigured: provider.isConfigured(),
+    providerConfigured: provider.isConfigured() && fromAddress.trim().length > 0,
     scheduledAt: message.scheduledAt,
     now,
   };
@@ -283,10 +298,15 @@ async function prepareSend(
 ): Promise<{ ok: true; prepared: PreparedSend } | { ok: false; outcome: SendOutcome }> {
   return getDb().transaction(async (tx) => {
     // Row lock: two workers cannot prepare the same message concurrently.
-    const locked = await tx.execute<Message>(
-      sql`select * from ${messages} where ${messages.id} = ${messageId} for update`,
-    );
-    const message = (locked.rows ?? [])[0] as Message | undefined;
+    // Uses the query builder rather than raw SQL so the result is mapped to
+    // camelCase field names — a raw `select *` returns snake_case columns.
+    const locked = await tx
+      .select()
+      .from(messages)
+      .where(eq(messages.id, messageId))
+      .limit(1)
+      .for('update');
+    const message = locked[0];
 
     if (!message) {
       return {
@@ -307,13 +327,18 @@ async function prepareSend(
     if (!verdict.ok) {
       const transient = isTransientBlock(verdict.reason);
 
+      // A message that simply is not approved yet must keep its review status:
+      // marking it BLOCKED would silently drop it out of the operator's review
+      // queue, turning "you haven't approved this" into "this disappeared".
+      const awaitingReview = message.status === 'DRAFT' || message.status === 'PENDING_APPROVAL';
+
       await tx
         .update(messages)
         .set({
           blockedReason: `${verdict.reason}: ${verdict.detail}`,
           updatedAt: new Date(),
           // A permanent block ends the message; a transient one leaves it queued.
-          ...(transient ? {} : { status: 'BLOCKED' as const }),
+          ...(transient || awaitingReview ? {} : { status: 'BLOCKED' as const }),
         })
         .where(eq(messages.id, message.id));
 
@@ -423,6 +448,11 @@ async function prepareSend(
       .where(eq(messages.id, message.id));
 
     const env = getEnv();
+    const profileRows = await tx
+      .select({ email: userProfiles.email })
+      .from(userProfiles)
+      .where(eq(userProfiles.userId, message.userId))
+      .limit(1);
 
     return {
       ok: true as const,
@@ -431,7 +461,7 @@ async function prepareSend(
         attemptId,
         attemptNumber,
         key,
-        fromEmail: message.fromEmail ?? env.EMAIL_FROM ?? '',
+        fromEmail: message.fromEmail ?? env.EMAIL_FROM ?? profileRows[0]?.email ?? '',
         replyTo: env.EMAIL_REPLY_TO,
         recipientDomain: emailDomain(message.toEmail) ?? '',
       },

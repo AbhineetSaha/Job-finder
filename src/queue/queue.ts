@@ -5,7 +5,7 @@
  * commit in the same transaction — there is no window in which a job exists
  * for a message that does not (docs/architecture.md §6).
  */
-import { and, eq, lt, sql } from 'drizzle-orm';
+import { and, eq, inArray, lt, sql } from 'drizzle-orm';
 import { getDb, type Database } from '../db/client.js';
 import { jobs, type Job } from '../db/schema.js';
 import { getEnv } from '../lib/env.js';
@@ -53,7 +53,11 @@ export async function enqueue(input: EnqueueInput, tx?: Database): Promise<Job |
  */
 export async function claimJobs(workerId: string, batchSize: number): Promise<Job[]> {
   const db = getDb();
-  const result = await db.execute<Job>(sql`
+
+  // Raw SQL is required for the SKIP LOCKED CTE, but it returns snake_case
+  // columns that do not match the Job type. Claim ids here, then re-select
+  // through the query builder so callers get correctly mapped rows.
+  const claimed = await db.execute<{ id: string }>(sql`
     with claimed as (
       select id from ${jobs}
        where ${jobs.status} = 'PENDING'
@@ -69,10 +73,13 @@ export async function claimJobs(workerId: string, batchSize: number): Promise<Jo
            attempts = ${jobs.attempts} + 1,
            updated_at = now()
      where ${jobs.id} in (select id from claimed)
-    returning *
+    returning ${jobs.id}
   `);
 
-  return (result.rows ?? []) as Job[];
+  const ids = (claimed.rows ?? []).map((row) => row.id);
+  if (ids.length === 0) return [];
+
+  return db.select().from(jobs).where(inArray(jobs.id, ids)).orderBy(jobs.runAfter);
 }
 
 export async function completeJob(jobId: string): Promise<void> {
