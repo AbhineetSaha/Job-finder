@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: outreach_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/outreach_test
+      SESSION_SECRET: ci-only-session-secret-at-least-32-characters
+      # Explicit, even though it is the default: CI must never be able to send
+      # real email. The test bootstrap aborts the run if this is "production".
+      EMAIL_MODE: mock
+      EMAIL_PROVIDER: mock
+      EMAIL_WEBHOOK_SECRET: test-webhook-secret-value
+      LOG_LEVEL: error
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Apply migrations
+        run: npm run db:migrate
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
