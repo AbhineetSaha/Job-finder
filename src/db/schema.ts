@@ -889,7 +889,10 @@ export const jobs = pgTable(
   },
   (t) => [
     index('jobs_status_run_after_idx').on(t.status, t.runAfter),
-    uniqueIndex('jobs_dedupe_key_key').on(t.dedupeKey).where(sql`${t.dedupeKey} is not null`),
+    // Not partial: Postgres already treats NULLs as distinct in a unique
+    // index, so unkeyed jobs never collide — and a partial index cannot be
+    // used as an ON CONFLICT arbiter without repeating its predicate.
+    uniqueIndex('jobs_dedupe_key_key').on(t.dedupeKey),
     index('jobs_claimed_at_idx').on(t.claimedAt).where(sql`${t.status} = 'CLAIMED'`),
   ],
 );

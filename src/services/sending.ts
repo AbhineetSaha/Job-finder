@@ -382,8 +382,6 @@ async function prepareSend(
       };
     }
 
-    // Reuse an in-flight attempt so a crash-recovery retry presents the same
-    // idempotency key to the provider instead of minting a new one.
     const inFlight = await tx
       .select()
       .from(messageAttempts)
@@ -396,10 +394,39 @@ async function prepareSend(
     let key: string;
 
     if (inFlight[0]) {
+      // A STARTED attempt means either (a) another worker is mid-send right
+      // now, or (b) a worker died between the provider call and recording the
+      // outcome. These need opposite treatment, and the visibility timeout is
+      // what distinguishes them.
+      //
+      // Recent   → concurrent. Refuse; the other worker owns this send.
+      // Stale    → crash recovery. Reuse the SAME attempt number so the
+      //            provider receives an identical idempotency key.
+      //
+      // Reusing on the concurrent path would leave duplicate suppression
+      // resting entirely on the provider deduplicating for us, which is not a
+      // guarantee worth depending on.
+      const staleBefore = new Date(
+        now.getTime() - getEnv().WORKER_VISIBILITY_TIMEOUT_SECONDS * 1000,
+      );
+
+      if (inFlight[0].startedAt > staleBefore) {
+        return {
+          ok: false as const,
+          outcome: {
+            status: 'BLOCKED' as const,
+            reason: 'MESSAGE_ALREADY_PROCESSED' as BlockReason,
+            detail: 'Another worker is already sending this message.',
+            transient: false,
+            retryAfter: null,
+          },
+        };
+      }
+
       attemptId = inFlight[0].id;
       attemptNumber = inFlight[0].attemptNumber;
       key = inFlight[0].idempotencyKey;
-      logger.warn('Resuming an in-flight send attempt', {
+      logger.warn('Resuming a stale in-flight send attempt', {
         event: 'send_attempt_resumed',
         messageId: message.id,
         attempt: attemptNumber,
