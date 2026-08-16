@@ -68,15 +68,25 @@ category.
 
 ## Other regimes
 
-* **GDPR / UK GDPR / PECR** — out of scope by design: the ICP is US-only and
-  `country` defaults to `US`. If the operator ever contacts EU/UK recipients,
+* **GDPR / UK GDPR / PECR** — originally out of scope, and still the regime
+  this system is *not* built for. Automated discovery now surfaces companies
+  outside the US (see `docs/discovery.md`), so candidates in the EEA and UK do
+  appear. They are classified `CONSENT_REQUIRED` and cannot be promoted to a
+  prospect until the operator explicitly confirms a lawful basis. That control
+  records a decision; it does not supply the lawful basis. If the operator ever contacts EU/UK recipients,
   the analysis is materially different (lawful basis, legitimate-interest
   assessment, and for the UK a stricter e-privacy rule on unsolicited email)
   and **requires legal advice before the first send**. The system does not
   block non-US prospects, but qualification awards zero points for a non-US
   company and the UI flags them.
 * **CASL (Canada)** — consent-based, not opt-out, with significant penalties.
-  Do not treat a Canadian recipient as equivalent to a US one.
+  Do not treat a Canadian recipient as equivalent to a US one. Canadian
+  candidates are classified `CONSENT_REQUIRED` for this reason.
+
+* **Discovery and data provenance** — every discovered candidate records its
+  source and source URL, so the provenance of any contact detail is auditable.
+  Only addresses published by the company or person are captured; the system
+  contains no address-guessing code path.
 * **Provider terms of service** — every email provider has its own cold-outreach
   policy, and some prohibit it outright on shared infrastructure. Read the
   policy before configuring a provider. The system contains no feature to evade

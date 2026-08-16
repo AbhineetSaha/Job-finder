@@ -42,6 +42,7 @@ What the system does:
 
 | | |
 | --- | --- |
+| **Discovery** | Automated sourcing from public APIs into a review queue — never straight into prospects |
 | **Prospecting** | Manual entry, CSV import with preview, deterministic deduplication |
 | **Qualification** | Configurable 8-signal scoring; unknown scores zero and is never guessed |
 | **Research** | Ten-question checklist with a source URL per claim |
@@ -210,9 +211,32 @@ Implement `EmailProvider` (`src/email/provider.ts`) in
 `src/email/providers/`, register it in the factory in `src/email/index.ts`.
 Nothing else in the codebase imports a provider concretely.
 
+## Discovery
+
+Automated sourcing finds companies outside India, biased toward funded
+startups whose stack matches your profile. Three free sources: Hacker News
+"Who is hiring?", GitHub organisations by language, and SEC Form D filings
+(companies that just raised).
+
+```bash
+npm run outreach -- discover add --kind hacker-news --name "Postgres startups" --keywords postgres
+npm run outreach -- discover run --id <source>
+npm run outreach -- discover candidates --min-score 50
+npm run outreach -- discover promote --id <candidate> --email cto@acme.io
+```
+
+**Discovery never creates a prospect and never sends anything.** Candidates are
+staged for review; promoting one is an explicit act and the prospect starts at
+`DISCOVERED`, still needing research, a draft, and approval.
+
+Two rules it will not bend: it never guesses an email address (only ones a
+company published), and a candidate in a consent-based jurisdiction (EEA, UK,
+Canada) cannot be promoted until you confirm you have a lawful basis. Full
+detail, including what was deliberately ruled out, in `docs/discovery.md`.
+
 ## Prospect workflow
 
-**1. Get prospects in.** Manual entry, or CSV import:
+**1. Get prospects in.** Discovery, manual entry, or CSV import:
 
 ```csv
 company_name,website,contact_name,contact_role,contact_email,source_url
@@ -357,7 +381,7 @@ npm run typecheck
 Point `DATABASE_URL` in `.env.test` at a scratch database. **No test can send
 real email:** the bootstrap aborts the entire run if `EMAIL_MODE=production`.
 
-228 tests:
+304 tests:
 
 | Suite | Covers |
 | --- | --- |
@@ -368,6 +392,7 @@ real email:** the bootstrap aborts the entire run if `EMAIL_MODE=production`.
 | `unit/no-ai-dependency` | no AI package, import, env var, or hostname anywhere |
 | `integration/workflow` | the full import → … → reply → CRM path |
 | `integration/safety` | suppression, reply-stops-sequence, limits, global pause, four duplicate-send guards, deletion preserving suppression |
+| `integration/discovery` | staging (never sending), geography exclusion, idempotent re-runs, promotion gates, per-operator scoping |
 | `security/security` | cross-tenant access, injection, webhook forgery and replay, credentials, secrets |
 
 ## Security
@@ -466,6 +491,7 @@ enqueued work it should not have).
 
 ## Documentation
 
+- `docs/discovery.md` — automated sourcing, geography and legal tiers, what was ruled out
 - `docs/architecture.md` — components, layering, sending pipeline, idempotency
 - `docs/data-model.md` — schema, indexes, retention, deletion
 - `docs/outreach-strategy.md` — ICP, qualification, what the system won't do

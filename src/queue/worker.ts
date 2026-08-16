@@ -46,6 +46,9 @@ export async function processJob(job: Job): Promise<void> {
       case 'RETENTION_SWEEP':
         await handleRetentionSweep(job);
         break;
+      case 'DISCOVERY_RUN':
+        await handleDiscoveryRun(job);
+        break;
       default:
         await failJob(job, `Unknown job kind: ${job.kind}`);
         return;
@@ -257,6 +260,41 @@ async function handleEnqueueNextStep(job: Job): Promise<void> {
     .update(prospects)
     .set({ nextFollowUpAt: dueAt, updatedAt: new Date() })
     .where(eq(prospects.id, row.prospect.id));
+
+  await completeJob(job.id);
+}
+
+/**
+ * Run a discovery source in the background.
+ *
+ * Discovery only ever writes to the staging table, so a failure here cannot
+ * affect anything that sends. A failed run is recorded on the run row and the
+ * job completes — retrying a source that is rate limiting us would make the
+ * situation worse, not better.
+ */
+async function handleDiscoveryRun(job: Job): Promise<void> {
+  const { runDiscovery } = await import('../services/discovery.js');
+
+  const userId = String(job.payload.userId ?? '');
+  const sourceId = String(job.payload.sourceId ?? '');
+  if (!userId || !sourceId) {
+    await failJob(job, 'DISCOVERY_RUN job is missing userId or sourceId.');
+    return;
+  }
+
+  const result = await runDiscovery({
+    userId,
+    sourceId,
+    ...(typeof job.payload.limit === 'number' ? { limit: job.payload.limit } : {}),
+  });
+
+  logger.info('Discovery job finished', {
+    event: 'discovery_job',
+    jobId: job.id,
+    userId,
+    status: result.status,
+    candidatesCreated: result.candidatesCreated,
+  });
 
   await completeJob(job.id);
 }

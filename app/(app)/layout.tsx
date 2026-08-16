@@ -12,6 +12,7 @@ import { getConfig } from '../../src/services/config.js';
 
 const NAV = [
   ['/', 'Dashboard'],
+  ['/discovery', 'Discovery'],
   ['/prospects', 'Prospects'],
   ['/review', 'Review queue'],
   ['/campaigns', 'Campaigns'],

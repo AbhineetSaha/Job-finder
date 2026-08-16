@@ -12,7 +12,7 @@ import { getEnv } from '../lib/env.js';
 import { retryDelaySeconds } from '../domain/ratelimit.js';
 import { logger } from '../lib/logger.js';
 
-export type JobKind = 'SEND_MESSAGE' | 'ENQUEUE_NEXT_STEP' | 'RETENTION_SWEEP';
+export type JobKind = 'SEND_MESSAGE' | 'ENQUEUE_NEXT_STEP' | 'RETENTION_SWEEP' | 'DISCOVERY_RUN';
 
 export interface EnqueueInput {
   kind: JobKind;

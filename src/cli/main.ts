@@ -31,6 +31,17 @@ import {
   setGlobalPause,
 } from '../services/ops.js';
 import { getQueueStats, listFailedJobs, releaseStuckJobs, retryJob } from '../queue/queue.js';
+import {
+  createDiscoverySource,
+  getDiscoveryCounts,
+  listCandidates,
+  listDiscoveryRuns,
+  listDiscoverySources,
+  listSources,
+  promoteCandidate,
+  rejectCandidate,
+  runDiscovery,
+} from '../services/discovery.js';
 
 /* -------------------------------------------------------------------------- */
 /* Argument parsing                                                           */
@@ -142,6 +153,15 @@ const HELP = `outreach — US freelance client acquisition
 
   suppression add    --email <address> | --domain <domain> [--reason]
   suppression list
+
+  discover sources                     # what adapters exist
+  discover list                        # configured sources
+  discover add       --kind <adapter> --name <label> [--keywords|--languages|--sic] [--limit] [--min-score]
+  discover run       --id <source> [--limit]
+  discover candidates [--status NEW] [--min-score] [--source] [--limit]
+  discover promote   --id <candidate> [--email] [--name] [--role] [--acknowledge-consent]
+  discover reject    --id <candidate> [--note]
+  discover runs
 
   analytics
   ops pause-all      [--reason]
@@ -404,6 +424,169 @@ async function run(args: Args): Promise<void> {
           added: row.createdAt.toISOString().slice(0, 10),
         })),
       );
+      return;
+    }
+  }
+
+  /* ----- discover ----- */
+  if (group === 'discover') {
+    if (command === 'sources') {
+      table(
+        listSources().map((source) => ({
+          kind: source.kind,
+          name: source.name.slice(0, 40),
+          basis: source.accessBasis.slice(0, 60),
+        })),
+      );
+      return;
+    }
+
+    const userId = await resolveUserId(args);
+
+    if (command === 'list') {
+      const rows = await listDiscoverySources(userId);
+      table(
+        rows.map((row) => ({
+          id: row.id.slice(0, 8),
+          name: row.name.slice(0, 28),
+          kind: row.kind,
+          enabled: row.enabled ? 'yes' : 'no',
+          last_run: row.lastRunAt ? row.lastRunAt.toISOString().slice(0, 16) : 'never',
+        })),
+      );
+      return;
+    }
+
+    if (command === 'add') {
+      const kind = required(args, 'kind');
+      const csv = (value: string | boolean | undefined): string[] =>
+        typeof value === 'string' ? value.split(',').map((v) => v.trim()).filter(Boolean) : [];
+
+      const config: Record<string, unknown> = {
+        limit: Number(args.options.limit ?? 50),
+        minMatchScore: Number(args.options['min-score'] ?? 0),
+      };
+      if (kind === 'hacker-news') config.keywords = csv(args.options.keywords);
+      if (kind === 'github') {
+        config.languages = csv(args.options.languages);
+        if (typeof args.options.token === 'string') config.token = args.options.token;
+      }
+      if (kind === 'sec-form-d') config.sicPrefixes = csv(args.options.sic);
+
+      const result = await createDiscoverySource({
+        userId,
+        kind,
+        name: required(args, 'name'),
+        config,
+      });
+      if (!result.ok) throw new CliError(result.error);
+      out(`Added source "${result.source.name}" (${result.source.id.slice(0, 8)}).`);
+      return;
+    }
+
+    if (command === 'run') {
+      const sources = await listDiscoverySources(userId);
+      const sourceId = await resolveByPrefix(sources, required(args, 'id'), 'source');
+
+      out('Running. This makes real requests to the source API, rate limited politely.');
+      const result = await runDiscovery({
+        userId,
+        sourceId,
+        ...(args.options.limit ? { limit: Number(args.options.limit) } : {}),
+      });
+
+      out('');
+      table([
+        {
+          status: result.status,
+          examined: result.itemsFetched,
+          staged: result.candidatesCreated,
+          already_known: result.duplicatesSkipped,
+          excluded_geo: result.excludedByGeography,
+          low_match: result.belowMatchThreshold,
+        },
+      ]);
+      for (const warning of result.warnings) out(`  warning: ${warning}`);
+      if (result.error) out(`  error: ${result.error}`);
+      out('\nCandidates are staged for review. Nothing has been contacted.');
+      return;
+    }
+
+    if (command === 'candidates') {
+      const result = await listCandidates(
+        userId,
+        {
+          status: ((args.options.status as string) ?? 'NEW') as 'NEW',
+          ...(args.options['min-score']
+            ? { minMatchScore: Number(args.options['min-score']) }
+            : {}),
+          ...(typeof args.options.source === 'string' ? { source: args.options.source } : {}),
+        },
+        1,
+        Number(args.options.limit ?? 25),
+      );
+
+      table(
+        result.items.map((c) => ({
+          id: c.id.slice(0, 8),
+          company: c.companyName.slice(0, 26),
+          match: c.matchScore,
+          country: c.country ?? '?',
+          contact: c.contactability === 'CONSENT_REQUIRED' ? 'consent!' : (c.country ?? '?'),
+          email: c.publishedEmail ? c.publishedEmail.slice(0, 26) : '(none)',
+          funding: c.fundingSignals[0]?.slice(0, 20) ?? '',
+        })),
+      );
+      out(`\n${result.total} total.`);
+      return;
+    }
+
+    if (command === 'promote') {
+      const all = await listCandidates(userId, {}, 1, 100);
+      const candidateId = await resolveByPrefix(all.items, required(args, 'id'), 'candidate');
+
+      const result = await promoteCandidate({
+        userId,
+        candidateId,
+        ...(typeof args.options.email === 'string' ? { contactEmail: args.options.email } : {}),
+        ...(typeof args.options.name === 'string' ? { contactName: args.options.name } : {}),
+        ...(typeof args.options.role === 'string' ? { contactRole: args.options.role } : {}),
+        acknowledgedConsentRisk: Boolean(args.options['acknowledge-consent']),
+      });
+
+      if (!result.ok) throw new CliError(result.error);
+      out(`Promoted to prospect ${result.prospectId.slice(0, 8)}. Research it before drafting.`);
+      return;
+    }
+
+    if (command === 'reject') {
+      const all = await listCandidates(userId, {}, 1, 100);
+      const candidateId = await resolveByPrefix(all.items, required(args, 'id'), 'candidate');
+      const result = await rejectCandidate(
+        userId,
+        candidateId,
+        (args.options.note as string) ?? 'Not a fit.',
+      );
+      if (!result.ok) throw new CliError(result.error ?? 'Could not reject.');
+      out('Rejected.');
+      return;
+    }
+
+    if (command === 'runs') {
+      const rows = await listDiscoveryRuns(userId, 20);
+      table(
+        rows.map((run) => ({
+          started: run.startedAt.toISOString().slice(0, 16),
+          kind: run.kind,
+          status: run.status,
+          examined: run.itemsFetched,
+          staged: run.candidatesCreated,
+          excluded: run.excludedByGeography,
+          error: (run.error ?? '').slice(0, 40),
+        })),
+      );
+      const counts = await getDiscoveryCounts(userId);
+      out(`\nAwaiting review: ${counts.new} · promoted: ${counts.promoted} · rejected: ${counts.rejected}`);
       return;
     }
   }

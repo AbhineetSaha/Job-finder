@@ -72,6 +72,7 @@ app/                      Next.js pages (server components) + route handlers
         │     └── depends on ──▶ src/db/      schema, client, migrations
         └── depends on ──▶ src/domain/        PURE business logic, zero I/O
         └── depends on ──▶ src/email/         provider interface + adapters
+src/sources/              ProspectSource adapters over public APIs (injectable fetch)
 src/queue/                worker + scheduler, depend on services + domain
 src/cli/                  thin wrapper over services
 ```

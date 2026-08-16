@@ -994,3 +994,156 @@ export type Deal = typeof deals.$inferSelect;
 export type Job = typeof jobs.$inferSelect;
 export type AuditLog = typeof auditLogs.$inferSelect;
 export type WebhookEvent = typeof webhookEvents.$inferSelect;
+
+/* -------------------------------------------------------------------------- */
+/* Discovery                                                                  */
+/* -------------------------------------------------------------------------- */
+
+export const discoveryRunStatusEnum = pgEnum('discovery_run_status', [
+  'RUNNING',
+  'SUCCEEDED',
+  'FAILED',
+  'PARTIAL',
+]);
+
+export const candidateStatusEnum = pgEnum('candidate_status', [
+  'NEW',
+  'PROMOTED',
+  'REJECTED',
+  'DUPLICATE',
+]);
+
+/**
+ * Contactability tier, derived from the candidate's country.
+ *
+ * This is a legal posture, not a preference. The US is an opt-out regime
+ * (CAN-SPAM); the EU/UK and Canada are consent-based and require a lawful
+ * basis assessment before any cold email. Candidates in those regions are
+ * discovered but cannot be promoted without an explicit acknowledgement.
+ */
+export const contactabilityEnum = pgEnum('contactability', [
+  'OPT_OUT_REGIME',
+  'CONSENT_REQUIRED',
+  'EXCLUDED',
+  'UNKNOWN',
+]);
+
+/** A configured instance of a ProspectSource. */
+export const discoverySources = pgTable(
+  'discovery_sources',
+  {
+    id: id(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    /** Which adapter: 'hacker-news' | 'github' | 'sec-form-d' | 'csv' | 'manual'. */
+    kind: text('kind').notNull(),
+    name: text('name').notNull(),
+    /** Adapter-specific query configuration. */
+    config: jsonb('config').$type<Record<string, unknown>>().notNull().default(sql`'{}'::jsonb`),
+    enabled: boolean('enabled').notNull().default(true),
+    lastRunAt: timestamp('last_run_at', { withTimezone: true }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    uniqueIndex('discovery_sources_user_name_key').on(t.userId, t.name),
+    index('discovery_sources_user_kind_idx').on(t.userId, t.kind),
+  ],
+);
+
+export const discoveryRuns = pgTable(
+  'discovery_runs',
+  {
+    id: id(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    sourceId: uuid('source_id').references(() => discoverySources.id, { onDelete: 'set null' }),
+    kind: text('kind').notNull(),
+    status: discoveryRunStatusEnum('status').notNull().default('RUNNING'),
+    startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),
+    finishedAt: timestamp('finished_at', { withTimezone: true }),
+    itemsFetched: integer('items_fetched').notNull().default(0),
+    candidatesCreated: integer('candidates_created').notNull().default(0),
+    duplicatesSkipped: integer('duplicates_skipped').notNull().default(0),
+    excludedByGeography: integer('excluded_by_geography').notNull().default(0),
+    belowMatchThreshold: integer('below_match_threshold').notNull().default(0),
+    error: text('error'),
+    /** Per-run notes, e.g. which query was issued and how it was paginated. */
+    metadata: jsonb('metadata').$type<Record<string, unknown>>().notNull().default(sql`'{}'::jsonb`),
+  },
+  (t) => [index('discovery_runs_user_started_idx').on(t.userId, t.startedAt.desc())],
+);
+
+/**
+ * Staging area. Discovered companies land here and are NEVER auto-created as
+ * prospects — a human promotes them (brief §5: human judgment stays part of
+ * the process). Nothing in this table can be emailed.
+ */
+export const discoveredCandidates = pgTable(
+  'discovered_candidates',
+  {
+    id: id(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    runId: uuid('run_id').references(() => discoveryRuns.id, { onDelete: 'set null' }),
+
+    companyName: text('company_name').notNull(),
+    normalizedName: text('normalized_name').notNull(),
+    domain: text('domain'),
+    normalizedDomain: text('normalized_domain'),
+    website: text('website'),
+    description: text('description'),
+
+    country: text('country'),
+    locationText: text('location_text'),
+    contactability: contactabilityEnum('contactability').notNull().default('UNKNOWN'),
+
+    technologyStack: jsonb('technology_stack').$type<string[]>().notNull().default(sql`'[]'::jsonb`),
+    fundingSignals: jsonb('funding_signals').$type<string[]>().notNull().default(sql`'[]'::jsonb`),
+    hiringSignals: jsonb('hiring_signals').$type<string[]>().notNull().default(sql`'[]'::jsonb`),
+
+    /**
+     * Only addresses the company or person published themselves. This system
+     * never guesses or permutes an address from a name and a domain.
+     */
+    publishedEmail: text('published_email'),
+    contactName: text('contact_name'),
+    contactRole: text('contact_role'),
+
+    /** Deterministic overlap between the candidate's stack and the operator's skills. */
+    matchScore: integer('match_score').notNull().default(0),
+    matchReasons: jsonb('match_reasons').$type<string[]>().notNull().default(sql`'[]'::jsonb`),
+
+    source: text('source').notNull(),
+    sourceUrl: text('source_url'),
+    /** The provider payload as fetched, for auditing what was actually claimed. */
+    rawPayload: jsonb('raw_payload').$type<Record<string, unknown>>().notNull().default(sql`'{}'::jsonb`),
+
+    status: candidateStatusEnum('status').notNull().default('NEW'),
+    reviewNote: text('review_note'),
+    promotedProspectId: uuid('promoted_prospect_id').references(() => prospects.id, {
+      onDelete: 'set null',
+    }),
+    reviewedAt: timestamp('reviewed_at', { withTimezone: true }),
+
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    // One candidate per company per source: re-running a source is idempotent.
+    uniqueIndex('discovered_candidates_dedupe_key')
+      .on(t.userId, t.source, t.normalizedName),
+    index('discovered_candidates_user_status_idx').on(t.userId, t.status),
+    index('discovered_candidates_user_score_idx').on(t.userId, t.matchScore.desc()),
+    index('discovered_candidates_domain_idx').on(t.userId, t.normalizedDomain),
+    index('discovered_candidates_run_idx').on(t.runId),
+  ],
+);
+
+export type DiscoverySource = typeof discoverySources.$inferSelect;
+export type DiscoveryRun = typeof discoveryRuns.$inferSelect;
+export type DiscoveredCandidate = typeof discoveredCandidates.$inferSelect;
+export type NewDiscoveredCandidate = typeof discoveredCandidates.$inferInsert;

@@ -15,6 +15,13 @@
       "when": 1786899823388,
       "tag": "0001_fix_jobs_dedupe_index",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1786901552171,
+      "tag": "0002_add_discovery",
+      "breakpoints": true
     }
   ]
 }
